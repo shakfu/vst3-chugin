@@ -1,0 +1,14 @@
+FLAGS+=-I$(CK_SRC_PATH) -fPIC -std=c++17
+LDFLAGS+=-shared -lstdc++
+
+# If VST3 SDK is available, link against it
+ifneq ("$(wildcard $(VST3_SDK_PATH))","")
+# VST3 SDK base libraries
+VST3_SDK_LIB=$(VST3_SDK_PATH)/build/lib
+ifneq ("$(wildcard $(VST3_SDK_LIB))","")
+LDFLAGS+=-L$(VST3_SDK_LIB) -lbase -lpluginterfaces -lsdk -lsdk_hosting
+endif
+endif
+
+LD=g++
+CXX=g++

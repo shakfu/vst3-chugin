@@ -1,0 +1,28 @@
+# Visual Studio makefile for VST3 chugin
+# Use the Visual Studio solution/project files instead
+# Or use nmake with this makefile
+
+!MESSAGE Building VST3 chugin for Windows
+!MESSAGE Use Visual Studio solution file or configure VST3_SDK_PATH
+
+CK_SRC_PATH=..\chuck\include
+VST3_SDK_PATH=C:\SDKs\VST_SDK\vst3sdk
+
+CHUGIN_NAME=VST3
+
+CXX_MODULES=VST3.cpp
+
+!IF EXISTS($(VST3_SDK_PATH))
+CFLAGS=/I$(CK_SRC_PATH) /I$(VST3_SDK_PATH) /DHAVE_VST3_SDK /D_USRDLL /D_WINDLL /std:c++17 /O2
+VST3_SDK_LIB=$(VST3_SDK_PATH)\build\lib\Release
+LDFLAGS=/DLL /LIBPATH:$(VST3_SDK_LIB) base.lib pluginterfaces.lib sdk.lib sdk_hosting.lib
+!ELSE
+CFLAGS=/I$(CK_SRC_PATH) /D_USRDLL /D_WINDLL /std:c++17 /O2
+LDFLAGS=/DLL
+!ENDIF
+
+$(CHUGIN_NAME).chug: $(CXX_MODULES)
+	cl $(CFLAGS) /LD $(CXX_MODULES) /link $(LDFLAGS) /OUT:$(CHUGIN_NAME).chug
+
+clean:
+	del *.obj *.chug *.exp *.lib

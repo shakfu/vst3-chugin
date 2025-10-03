@@ -1,0 +1,21 @@
+ARCHS?=x86_64 arm64
+ARCHOPTS=$(addprefix -arch ,$(ARCHS))
+
+DEFINES = -DRELEASE
+FLAGS+=-mmacosx-version-min=10.9 -I$(CK_SRC_PATH) $(ARCHOPTS) -fPIC -std=c++17 $(DEFINES)
+LDFLAGS+=-mmacosx-version-min=10.9 -shared $(ARCHOPTS)
+
+# Link against required frameworks for VST3
+LDFLAGS+=-framework CoreFoundation -framework CoreServices
+
+# If VST3 SDK is available, link against it
+ifneq ("$(wildcard $(VST3_SDK_PATH))","")
+# VST3 SDK base libraries
+VST3_SDK_LIB=$(VST3_SDK_PATH)/build/lib
+ifneq ("$(wildcard $(VST3_SDK_LIB))","")
+LDFLAGS+=-L$(VST3_SDK_LIB) -lsdk_hosting -lsdk -lsdk_common -lbase -lpluginterfaces
+endif
+endif
+
+LD=clang++
+CXX=clang++
