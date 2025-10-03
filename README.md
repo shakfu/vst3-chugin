@@ -2,6 +2,3 @@
 
 A prototype vst3 chugin for the chuck language.
 
-(still needs registration with steinberg)
-
-
