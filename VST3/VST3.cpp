@@ -27,6 +27,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <algorithm>
 
 // VST3 SDK includes
 #ifdef HAVE_VST3_SDK
@@ -39,6 +40,7 @@
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/vstspeaker.h"
 #include "pluginterfaces/base/funknown.h"
 #include "base/source/fstring.h"
 
@@ -88,54 +90,30 @@ public:
         , m_processor(nullptr)
         , m_bypass(false)
         , m_isInstrument(false)
+        , m_module()
         , m_processData()
         , m_processContext()
         , m_eventList()
         , m_inputEvents()
         , m_outputEvents()
     {
-        // Initialize process data
         memset(&m_processData, 0, sizeof(m_processData));
         memset(&m_processContext, 0, sizeof(m_processContext));
 
-        // Allocate audio buffers (mono input, stereo output for now)
-        m_inputBuffer[0] = (Sample32*)calloc(1, sizeof(Sample32));
-        m_outputBuffer[0] = (Sample32*)calloc(1, sizeof(Sample32));
-        m_outputBuffer[1] = (Sample32*)calloc(1, sizeof(Sample32));
-
-        // Setup audio bus buffers
-        m_processData.numSamples = 1;
         m_processData.symbolicSampleSize = kSample32;
-
-        m_inputs[0].channelBuffers32 = m_inputBuffer;
-        m_inputs[0].numChannels = 1;
-        m_inputs[0].silenceFlags = 0;
-
-        m_outputs[0].channelBuffers32 = m_outputBuffer;
-        m_outputs[0].numChannels = 2;
-        m_outputs[0].silenceFlags = 0;
-
-        m_processData.inputs = m_inputs;
-        m_processData.outputs = m_outputs;
-        m_processData.numInputs = 1;
-        m_processData.numOutputs = 1;
-
-        // Setup event lists
-        m_processData.inputEvents = &m_inputEvents;
-        m_processData.outputEvents = &m_outputEvents;
-
-        // Setup process context
+        m_processData.numSamples = 1;
+        m_processData.processMode = kRealtime;
         m_processContext.sampleRate = m_sampleRate;
         m_processContext.state = ProcessContext::kPlaying;
+        m_processContext.projectTimeSamples = 0;
         m_processData.processContext = &m_processContext;
+        m_processData.inputEvents = &m_inputEvents;
+        m_processData.outputEvents = &m_outputEvents;
     }
 
     ~VST3Wrapper()
     {
         close();
-        if(m_inputBuffer[0]) free(m_inputBuffer[0]);
-        if(m_outputBuffer[0]) free(m_outputBuffer[0]);
-        if(m_outputBuffer[1]) free(m_outputBuffer[1]);
     }
 
     bool load(const char* path)
@@ -143,15 +121,15 @@ public:
         close();
 
         std::string errorDescription;
-        auto module = VST3::Hosting::Module::create(path, errorDescription);
+        m_module = VST3::Hosting::Module::create(path, errorDescription);
 
-        if(!module)
+        if(!m_module)
         {
             fprintf(stderr, "[VST3]: Could not load module: %s\n", errorDescription.c_str());
             return false;
         }
 
-        auto factory = module->getFactory();
+        auto factory = m_module->getFactory();
 
         // Get the first audio module class
         for(auto& classInfo : factory.classInfos())
@@ -209,11 +187,18 @@ public:
             }
         }
 
+        if(!configureBuses())
+        {
+            fprintf(stderr, "[VST3]: Could not configure audio buses\n");
+            close();
+            return false;
+        }
+
         // Setup audio processing
         ProcessSetup setup;
         setup.processMode = kRealtime;
         setup.symbolicSampleSize = kSample32;
-        setup.maxSamplesPerBlock = 1;
+        setup.maxSamplesPerBlock = m_processData.numSamples;
         setup.sampleRate = m_sampleRate;
 
         if(m_processor->setupProcessing(setup) != kResultOk)
@@ -296,6 +281,23 @@ public:
             m_component = nullptr;
         }
 
+        m_module.reset();
+
+        m_inputBuses.clear();
+        m_outputBuses.clear();
+        m_inputChannelData.clear();
+        m_outputChannelData.clear();
+        m_inputChannelPointers.clear();
+        m_outputChannelPointers.clear();
+
+        m_processData.inputs = nullptr;
+        m_processData.outputs = nullptr;
+        m_processData.numInputs = 0;
+        m_processData.numOutputs = 0;
+        m_processContext.projectTimeSamples = 0;
+        m_inputEvents.clear();
+        m_outputEvents.clear();
+
         m_parameters.clear();
         m_presets.clear();
         m_isInstrument = false;
@@ -306,12 +308,30 @@ public:
         if(!m_processor || m_bypass)
             return input;
 
-        // Set input
-        m_inputBuffer[0][0] = input;
+        if(!m_inputChannelData.empty())
+        {
+            for(auto& value : m_inputChannelData[0])
+            {
+                value = static_cast<Sample32>(input);
+            }
+        }
 
-        // Clear output
-        m_outputBuffer[0][0] = 0.0f;
-        m_outputBuffer[1][0] = 0.0f;
+        for(auto& bus : m_inputBuses)
+        {
+            bus.silenceFlags = 0;
+        }
+
+        for(auto& bus : m_outputChannelData)
+        {
+            std::fill(bus.begin(), bus.end(), 0.0f);
+        }
+
+        for(auto& bus : m_outputBuses)
+        {
+            bus.silenceFlags = 0;
+        }
+
+        m_processData.numSamples = 1;
 
         // Process
         tresult result = m_processor->process(m_processData);
@@ -333,8 +353,12 @@ public:
         // Update process context
         m_processContext.projectTimeSamples += 1;
 
-        // Return mono output (left channel)
-        return m_outputBuffer[0][0];
+        if(!m_outputChannelData.empty() && !m_outputChannelData[0].empty())
+        {
+            return m_outputChannelData[0][0];
+        }
+
+        return m_isInstrument ? 0.0 : input;
     }
 
     bool setParameter(t_CKINT index, t_CKFLOAT value)
@@ -702,6 +726,148 @@ private:
         }
     }
 
+    bool configureBuses()
+    {
+        const int32 totalInputBuses = m_component->getBusCount(kAudio, kInput);
+        const int32 totalOutputBuses = m_component->getBusCount(kAudio, kOutput);
+
+        const int32 activeInputBuses = totalInputBuses > 0 ? 1 : 0;
+        const int32 activeOutputBuses = totalOutputBuses > 0 ? 1 : 0;
+
+        if(activeOutputBuses == 0)
+        {
+            fprintf(stderr, "[VST3]: Plugin exposes no audio outputs\n");
+            return false;
+        }
+
+        std::vector<SpeakerArrangement> inputArrangements(activeInputBuses);
+        std::vector<SpeakerArrangement> outputArrangements(activeOutputBuses);
+
+        auto resolveArrangement = [&](BusDirection direction, int32 index, SpeakerArrangement& arrangement) {
+            if(m_processor->getBusArrangement(direction, index, arrangement) != kResultOk || arrangement == 0)
+            {
+                BusInfo info{};
+                if(m_component->getBusInfo(kAudio, direction, index, info) == kResultOk)
+                {
+                    arrangement = arrangementForChannelCount(info.channelCount);
+                }
+            }
+        };
+
+        if(activeInputBuses > 0)
+        {
+            resolveArrangement(kInput, 0, inputArrangements[0]);
+        }
+
+        resolveArrangement(kOutput, 0, outputArrangements[0]);
+
+        SpeakerArrangement* inputArray = activeInputBuses ? inputArrangements.data() : nullptr;
+        SpeakerArrangement* outputArray = activeOutputBuses ? outputArrangements.data() : nullptr;
+
+        if(m_processor->setBusArrangements(inputArray, activeInputBuses, outputArray, activeOutputBuses) != kResultOk)
+        {
+            fprintf(stderr, "[VST3]: Failed to negotiate bus arrangements\n");
+            return false;
+        }
+
+        // Host currently drives a single audio bus per direction; disable the rest explicitly.
+        for(int32 i = 0; i < totalInputBuses; ++i)
+        {
+            const bool shouldActivate = i < activeInputBuses;
+            m_component->activateBus(kAudio, kInput, i, shouldActivate);
+        }
+
+        for(int32 i = 0; i < totalOutputBuses; ++i)
+        {
+            const bool shouldActivate = i < activeOutputBuses;
+            m_component->activateBus(kAudio, kOutput, i, shouldActivate);
+        }
+
+        // Refresh bus info to obtain channel counts after arrangement negotiation
+        std::vector<int32> inputChannelCounts;
+        std::vector<int32> outputChannelCounts;
+
+        if(activeInputBuses > 0)
+        {
+            BusInfo info{};
+            if(m_component->getBusInfo(kAudio, kInput, 0, info) == kResultOk)
+            {
+                inputChannelCounts.push_back(info.channelCount);
+            }
+            else
+            {
+                inputChannelCounts.push_back(SpeakerArr::getChannelCount(inputArrangements[0]));
+            }
+        }
+
+        {
+            BusInfo info{};
+            if(m_component->getBusInfo(kAudio, kOutput, 0, info) == kResultOk)
+            {
+                outputChannelCounts.push_back(info.channelCount);
+            }
+            else
+            {
+                outputChannelCounts.push_back(SpeakerArr::getChannelCount(outputArrangements[0]));
+            }
+        }
+
+        allocateAudioBuffers(inputChannelCounts, outputChannelCounts);
+
+        return true;
+    }
+
+    void allocateAudioBuffers(const std::vector<int32>& inputChannelCounts,
+                              const std::vector<int32>& outputChannelCounts)
+    {
+        auto configure = [](const std::vector<int32>& channelCounts,
+                            std::vector<AudioBusBuffers>& buses,
+                            std::vector<std::vector<Sample32>>& channelData,
+                            std::vector<std::vector<Sample32*>>& channelPointers) {
+            buses.resize(channelCounts.size());
+            channelData.resize(channelCounts.size());
+            channelPointers.resize(channelCounts.size());
+
+            for(size_t busIndex = 0; busIndex < channelCounts.size(); ++busIndex)
+            {
+                const int32 channels = channelCounts[busIndex];
+
+                channelData[busIndex].assign(static_cast<size_t>(std::max<int32>(channels, 0)), 0.f);
+                channelPointers[busIndex].resize(static_cast<size_t>(std::max<int32>(channels, 0)));
+
+                for(int32 c = 0; c < channels; ++c)
+                {
+                    channelPointers[busIndex][static_cast<size_t>(c)] = &channelData[busIndex][static_cast<size_t>(c)];
+                }
+
+                AudioBusBuffers bus;
+                bus.numChannels = channels;
+                bus.silenceFlags = 0;
+                bus.channelBuffers32 = channels > 0 ? channelPointers[busIndex].data() : nullptr;
+                buses[busIndex] = bus;
+            }
+        };
+
+        configure(inputChannelCounts, m_inputBuses, m_inputChannelData, m_inputChannelPointers);
+        configure(outputChannelCounts, m_outputBuses, m_outputChannelData, m_outputChannelPointers);
+
+        m_processData.inputs = m_inputBuses.empty() ? nullptr : m_inputBuses.data();
+        m_processData.outputs = m_outputBuses.empty() ? nullptr : m_outputBuses.data();
+        m_processData.numInputs = static_cast<int32>(m_inputBuses.size());
+        m_processData.numOutputs = static_cast<int32>(m_outputBuses.size());
+    }
+
+    static SpeakerArrangement arrangementForChannelCount(int32 channels)
+    {
+        switch(channels)
+        {
+            case 0: return 0;
+            case 1: return SpeakerArr::kMono;
+            case 2: return SpeakerArr::kStereo;
+            default: return 0;
+        }
+    }
+
     // Simple event list implementation
     class EventList : public IEventList
     {
@@ -742,11 +908,16 @@ private:
     bool m_bypass;
     bool m_isInstrument;
 
+    // Hosting module lifetime
+    VST3::Hosting::Module::Ptr m_module;
+
     // Audio buffers
-    Sample32* m_inputBuffer[1];
-    Sample32* m_outputBuffer[2];
-    AudioBusBuffers m_inputs[1];
-    AudioBusBuffers m_outputs[1];
+    std::vector<AudioBusBuffers> m_inputBuses;
+    std::vector<AudioBusBuffers> m_outputBuses;
+    std::vector<std::vector<Sample32>> m_inputChannelData;
+    std::vector<std::vector<Sample32>> m_outputChannelData;
+    std::vector<std::vector<Sample32*>> m_inputChannelPointers;
+    std::vector<std::vector<Sample32*>> m_outputChannelPointers;
 
     // Process data
     ProcessData m_processData;

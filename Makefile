@@ -1,4 +1,4 @@
-.PHONY: all setup mac linux win32 web clean
+.PHONY: all setup mac linux win32 web clean help test
 
 define build-vst
 @$(MAKE) -C VST3 $1
@@ -32,3 +32,6 @@ clean:
 help:
 	@echo "please use one of the following configurations:"
 	@echo "   make linux, make mac, make web, or make win32"
+
+test:
+	@chuck --chugin-path:VST3 VST3/examples/00-list-vst3.ck -v3
